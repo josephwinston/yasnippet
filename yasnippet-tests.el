@@ -204,54 +204,56 @@
       (ert-simulate-command `(yas-mock-insert "bbb"))
       (should (string= (yas--buffer-contents) "if condition\naaa\nelse\nbbb\nend")))))
 
-(ert-deftest example-for-issue-404 ()
-  (with-temp-buffer
-    (c++-mode)
-    (yas-minor-mode 1)
-    (insert "#include <foo>\n")
-    (let ((snippet "main"))
-      (let ((yas-good-grace nil)) (yas-expand-snippet snippet))
-      (should (string= (yas--buffer-contents) "#include <foo>\nmain")))))
+(defmacro yas--with-font-locked-temp-buffer (&rest body)
+  "Like `with-temp-buffer', but ensure `font-lock-mode'."
+  (declare (indent 0) (debug t))
+  (let ((temp-buffer (make-symbol "temp-buffer")))
+    ;; NOTE: buffer name must not start with a space, otherwise
+    ;; `font-lock-mode' doesn't turn on.
+    `(let ((,temp-buffer (generate-new-buffer "*yas-temp*")))
+       (with-current-buffer ,temp-buffer
+         ;; pretend we're interactive so `font-lock-mode' turns on
+         (let ((noninteractive nil)
+               ;; turn on font locking after major mode change
+               (change-major-mode-after-body-hook #'font-lock-mode))
+           (unwind-protect
+               (progn (require 'font-lock)
+                      ;; turn on font locking before major mode change
+                      (font-lock-mode +1)
+                      ,@body)
+             (and (buffer-name ,temp-buffer)
+                  (kill-buffer ,temp-buffer))))))))
 
-(ert-deftest example-for-issue-404-c-mode ()
-  (with-temp-buffer
+(ert-deftest example-for-issue-474 ()
+  (yas--with-font-locked-temp-buffer
     (c-mode)
     (yas-minor-mode 1)
     (insert "#include <foo>\n")
-    (let ((snippet "main"))
-      (let ((yas-good-grace nil)) (yas-expand-snippet snippet))
-      (should (string= (yas--buffer-contents) "#include <foo>\nmain")))))
+    (let ((yas-good-grace nil)) (yas-expand-snippet "`\"TODO: \"`"))
+    (should (string= (yas--buffer-contents) "#include <foo>\nTODO: "))))
 
-(ert-deftest example-for-issue-404-external-emacs ()
-  :tags '(:external)
-  (let ((fixture-el-file (make-temp-file "yas-404-fixture" nil ".el")))
-    (with-temp-buffer
-      (insert (pp-to-string
-               `(condition-case _
-                    (progn
-                      (require 'yasnippet)
-                      (yas-global-mode)
-                      (switch-to-buffer "foo.c")
-                      (c-mode)
-                      (insert "#include <iostream>\nmain")
-                      (setq yas-good-grace nil)
-                      (yas-expand)
-                      (kill-emacs 0))
-                  (error (kill-emacs -1)))))
-      (write-file fixture-el-file))
-    (should (= 0
-               (call-process (concat invocation-directory invocation-name)
-                             nil nil nil
-                             "-Q"  ;; "--batch"
-                             "-L" "." "-l" fixture-el-file)))))
+(ert-deftest example-for-issue-404 ()
+  (yas--with-font-locked-temp-buffer
+    (c++-mode)
+    (yas-minor-mode 1)
+    (insert "#include <foo>\n")
+    (let ((yas-good-grace nil)) (yas-expand-snippet "main"))
+    (should (string= (yas--buffer-contents) "#include <foo>\nmain"))))
+
+(ert-deftest example-for-issue-404-c-mode ()
+  (yas--with-font-locked-temp-buffer
+    (c-mode)
+    (yas-minor-mode 1)
+    (insert "#include <foo>\n")
+    (let ((yas-good-grace nil)) (yas-expand-snippet "main"))
+    (should (string= (yas--buffer-contents) "#include <foo>\nmain"))))
 
 (ert-deftest middle-of-buffer-snippet-insertion ()
   (with-temp-buffer
     (yas-minor-mode 1)
     (insert "beginning")
     (save-excursion (insert "end"))
-    (let ((snippet "-middle-"))
-      (yas-expand-snippet snippet))
+    (yas-expand-snippet "-middle-")
     (should (string= (yas--buffer-contents) "beginning-middle-end"))))
 
 (ert-deftest another-example-for-issue-271 ()
@@ -325,10 +327,10 @@ TODO: correct this bug!"
     ;; saving all definitions before overriding anything ensures FDEFINITION
     ;; errors don't cause accidental permanent redefinitions.
     ;;
-    (cl-flet ((set-fdefinitions (names functions)
-                                (loop for name in names
-                                      for fn in functions
-                                      do (fset name fn))))
+    (cl-labels ((set-fdefinitions (names functions)
+                                  (loop for name in names
+                                        for fn in functions
+                                        do (fset name fn))))
       (set-fdefinitions definition-names overriding-functions)
       (unwind-protect (funcall function)
 	(set-fdefinitions definition-names saved-functions)))))
@@ -409,12 +411,14 @@ TODO: correct this bug!"
      (yas-reload-all)
      (with-temp-buffer
        (let* ((major-mode 'c-mode)
-              (expected '(c-mode
+              (expected `(c-mode
                           cc-mode
                           yet-another-c-mode
                           and-also-this-one
                           and-that-one
-                          prog-mode
+                          ;; prog-mode doesn't exit in emacs 24.3
+                          ,@(if (fboundp 'prog-mode)
+                                '(prog-mode))
                           emacs-lisp-mode
                           lisp-interaction-mode))
               (observed (yas--modes-to-activate)))
@@ -592,7 +596,11 @@ TODO: be meaner"
           (yas-reload-all)
           (should (not (eq (key-binding (yas--read-keybinding "TAB")) 'yas-expand)))
           (should (eq (key-binding (yas--read-keybinding "SPC")) 'yas-expand))))
-    (setcdr yas-minor-mode-map (cdr (yas--init-minor-keymap)))))
+    ;; FIXME: actually should restore to whatever saved values where there.
+    ;; 
+    (define-key yas-minor-mode-map [tab] 'yas-expand)
+    (define-key yas-minor-mode-map (kbd "TAB") 'yas-expand)
+    (define-key yas-minor-mode-map (kbd "SPC") nil)))
 
 (ert-deftest test-yas-in-org ()
   (with-temp-buffer
@@ -605,39 +613,28 @@ TODO: be meaner"
   "Given a symbol, `yas-activate-extra-mode' should be able to
 add the snippets associated with the given mode."
   (with-temp-buffer
-    (emacs-lisp-mode)
-    (yas-minor-mode-on)
-    (yas-activate-extra-mode 'markdown-mode)
-    (should (eq 'markdown-mode (car yas--extra-modes)))
-    (yas-should-expand '(("_" . "_Text_ ")))
-    (yas-should-expand '(("car" . "(car )")))))
-
-(ert-deftest test-yas-deactivate-extra-modes ()
-  "Given a symbol, `yas-deactive-extra-mode' should be able to
-remove one of the extra modes that is present in the current
-buffer."
-  (with-temp-buffer
-    (emacs-lisp-mode)
-    (yas-minor-mode-on)
-    (yas-activate-extra-mode 'markdown-mode)
-    (should (eq 'markdown-mode (car yas--extra-modes)))
-    (yas-deactivate-extra-mode 'markdown-mode)
-    (should-not (eq 'markdown-mode (car yas--extra-modes)))
-    (yas-should-not-expand '("_"))
-    (yas-should-expand '(("car" . "(car )")))))
+    (yas-saving-variables
+     (yas-with-snippet-dirs
+       '((".emacs.d/snippets"
+          ("markdown-mode"
+           ("_" . "_Text_ "))
+          ("emacs-lisp-mode"
+           ("car" . "(car )"))))
+       (yas-reload-all)
+       (emacs-lisp-mode)
+       (yas-minor-mode-on)
+       (yas-activate-extra-mode 'markdown-mode)
+       (should (eq 'markdown-mode (car yas--extra-modes)))
+       (yas-should-expand '(("_" . "_Text_ ")))
+       (yas-should-expand '(("car" . "(car )")))
+       (yas-deactivate-extra-mode 'markdown-mode)
+       (should-not (eq 'markdown-mode (car yas--extra-modes)))
+       (yas-should-not-expand '("_"))
+       (yas-should-expand '(("car" . "(car )")))))))
 
 
 ;;; Helpers
 ;;;
-(defun yas-batch-run-tests (&optional also-external)
-  (interactive)
-  (with-temp-buffer
-    (yas--with-temporary-redefinitions
-     ((message (&rest _args) nil))
-     (ert (or (and also-external t)
-              '(not (tag :external))) (buffer-name (current-buffer)))
-    (princ (buffer-string)))))
-
 (defun yas-should-expand (keys-and-expansions)
   (dolist (key-and-expansion keys-and-expansions)
     (yas-exit-all-snippets)
